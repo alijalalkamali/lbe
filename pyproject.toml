@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lbe"
+version = "0.1.0"
+description = "LLM Behavioral Eval — rigorous behavioral evaluation of small open-weights LLMs"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    {name = "Ali Jalal-Kamali"}
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"

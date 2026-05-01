@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+*.egg-info/
+*.egg
+build/
+dist/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/*
+!.vscode/settings.json
+
+# Data and model artifacts
+data/*
+!data/.gitkeep
+results/*
+!results/.gitkeep
+*.pt
+*.ckpt
+*.bin
+*.safetensors
+
+# HuggingFace cache (can be huge)
+.cache/
+
+# Reference materials
+_reference/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# pytest / linters
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environment
+.env
+*.local
