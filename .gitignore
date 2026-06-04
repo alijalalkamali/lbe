@@ -23,6 +23,7 @@ env/
 # Data and model artifacts
 data/*
 !data/.gitkeep
+!data/*.jsonl
 results/*
 !results/.gitkeep
 *.pt
