@@ -74,6 +74,28 @@ class EvalResult(BaseModel):
 
     Captures enough to reproduce the experiment and slice the analysis later
     by model, item category, seed, etc.
+
+    Attributes:
+        item_id: The item this result is for.
+        item_type: Discriminator matching the EvalItem subclass used.
+        model_name: Loader identifier of the responding model.
+        seed: Legacy field. NOT applied per-call by any API backend — the
+            Model interface deliberately excludes sampling controls (see
+            base.py) because most provider APIs reject them for reasoning
+            models. Backends that do apply a seed set it internally at
+            request time and document it. Retained for schema compatibility
+            with existing result files; do not read it as evidence that a
+            seed was applied to this generation.
+        raw_completions: One entry per generation. For steerability v2 this
+            is exactly [base_response, steered_response].
+        finish_reasons: Provider stop-reason per entry in raw_completions,
+            same order and length. None for records written before this
+            field existed — absence means "not recorded", NOT "completed
+            cleanly". Use this to detect responses truncated at the token
+            ceiling, which would otherwise be indistinguishable from a model
+            simply choosing to answer briefly.
+        score: Eval-specific scalar; None if not yet scored.
+        extra: Eval-specific extras (e.g. {"category": ...}).
     """
 
     item_id: str
@@ -81,5 +103,6 @@ class EvalResult(BaseModel):
     model_name: str
     seed: int | None
     raw_completions: list[str]  # one per generation (multiple if multi-seed)
+    finish_reasons: list[str | None] | None = None
     score: float | None  # eval-specific scalar; None if not yet scored
     extra: dict = Field(default_factory=dict)  # eval-specific extras

@@ -1,8 +1,18 @@
 """Local HuggingFace model backend.
 
-Loads any HuggingFace causal language model (Llama, Qwen, Mistral, etc.) and
+Loads any HuggingFace causal language model (Llama, Qwen, Gemma, etc.) and
 runs inference locally on the GPU. Wraps the messy details of tokenization,
 device placement, and generation behind the Model interface.
+
+Not used for the behavioral study (all six study models are API-served).
+This backend is the entry point for the mechanistic-interpretability phase,
+where open-weight models are run locally to access hidden states.
+
+Sampling controls:
+    Unlike the API backends, this one CAN honor temperature/seed per call,
+    so it accepts them as optional keyword arguments beyond the declared
+    Model.generate() interface. Callers using only the declared signature
+    get greedy, deterministic decoding — see the temperature default below.
 """
 
 import torch
@@ -40,11 +50,32 @@ class LocalHFModel(Model):
     def generate(
         self,
         prompt: str,
-        max_new_tokens: int = 256,
-        temperature: float = 1.0,
+        max_new_tokens: int = 500,
+        temperature: float = 0.0,
         seed: int | None = None,
     ) -> GenerationOutput:
-        if seed is not None:
+        """Generate a completion locally.
+
+        Args:
+            prompt: The input text.
+            max_new_tokens: Maximum new tokens to generate.
+            temperature: Sampling temperature. Defaults to 0.0 (greedy,
+                deterministic) rather than 1.0, because every use of this
+                backend in this project is an evaluation or interpretability
+                run where reproducibility is required. A caller who wants
+                sampling must ask for it explicitly.
+            seed: Torch seed, applied only when temperature > 0 makes
+                generation stochastic. Ignored under greedy decoding, where
+                it has no effect anyway.
+
+        Returns:
+            GenerationOutput with finish_reason set to "length" if the
+            generation ran to the token ceiling without emitting EOS, or
+            "stop" if it terminated naturally — matching the vocabulary the
+            API backends report, so truncation checks are uniform across
+            backends.
+        """
+        if seed is not None and temperature > 0.0:
             torch.manual_seed(seed)
 
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
@@ -63,8 +94,16 @@ class LocalHFModel(Model):
         new_token_ids = output_ids[0, prompt_length:]
         text = self.tokenizer.decode(new_token_ids, skip_special_tokens=True)
 
+        # HF doesn't report a finish_reason, so derive one that matches the
+        # API backends' vocabulary: generation is truncated iff it produced
+        # the full token allowance without ever emitting EOS.
+        emitted_eos = bool((new_token_ids == self.tokenizer.eos_token_id).any())
+        hit_ceiling = new_token_ids.shape[0] >= max_new_tokens
+        finish_reason = "length" if (hit_ceiling and not emitted_eos) else "stop"
+
         return GenerationOutput(
             text=text,
             prompt=prompt,
             model_name=self.model_name,
+            finish_reason=finish_reason,
         )

@@ -50,3 +50,9 @@ Thumbs.db
 .env
 *.local
 review/
+
+# Backup files
+*.bak
+*:Zone.Identifier
+*:Zone.Identifier
+*:Zone.Identifier
