@@ -56,3 +56,15 @@ review/
 *:Zone.Identifier
 *:Zone.Identifier
 *:Zone.Identifier
+
+*:Zone.Identifier
+*.bak
+*.prepurge.bak
+.env
+
+# Raw per-judge judgment files — large, distributed via release/Zenodo
+results/judgments/*.jsonl
+
+# Private working notes and draft chapters
+notes/
+judge_validation_observations.md

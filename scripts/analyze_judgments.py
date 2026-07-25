@@ -348,6 +348,7 @@ def pairwise_classification_tests(
 
 def compute_fleiss_kappa_per_category(
     judgments_dir: Path,
+    item_id_filter: set[str] | None = None,
 ) -> dict[str, float]:
     """Compute Fleiss' kappa per category by re-loading judgments.
 
@@ -356,6 +357,11 @@ def compute_fleiss_kappa_per_category(
 
     Args:
         judgments_dir: The results/judgments directory.
+        item_id_filter: If given, restrict kappa computation to only these
+            item IDs. Used to compute agreement over a held-out item range
+            (e.g. items authored after rubric construction) separately from
+            the full-instrument figure. None computes over all items, the
+            original behavior.
 
     Returns:
         Dict mapping category to Fleiss' kappa.
@@ -365,6 +371,8 @@ def compute_fleiss_kappa_per_category(
     from lbe.judging.aggregate import compute_fleiss_kappa, load_all_judgments
 
     df = load_all_judgments(judgments_dir)
+    if item_id_filter is not None:
+        df = df[df["item_id"].isin(item_id_filter)]
     categories = df["category"].unique()
     return {cat: compute_fleiss_kappa(df, cat) for cat in categories}
 
@@ -514,11 +522,42 @@ def main() -> None:
         default=None,
         help="Directory to write analysis outputs. Default: results/analysis " "in project root.",
     )
+    parser.add_argument(
+        "--item-range",
+        type=int,
+        nargs=2,
+        metavar=("START", "END"),
+        default=None,
+        help="Restrict analysis to items whose numeric ID suffix falls in "
+        "[START, END] inclusive, e.g. --item-range 21 100 for the held-out "
+        "80 items per core category. Filtering is by numeric suffix only, "
+        "so it applies uniformly across category prefixes (vcl_, rve_, "
+        "rvs_, sty_, rh_); since the two sanity categories only go up to "
+        "item 20, any range starting above 20 naturally excludes them "
+        "without needing to name categories explicitly. Default: no "
+        "filter, use all items.",
+    )
+    parser.add_argument(
+        "--output-suffix",
+        type=str,
+        default="",
+        help="Suffix appended to every output filename before its "
+        "extension, e.g. --output-suffix _heldout80 writes "
+        "cross_lab_tables_heldout80.csv instead of cross_lab_tables.csv, "
+        "so a filtered run never overwrites the full-instrument outputs.",
+    )
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent.parent
     judgments_dir = args.judgments_dir or (repo_root / "results" / "judgments")
     output_dir = args.output_dir or (repo_root / "results" / "analysis")
+
+    def _out(name: str) -> Path:
+        """Insert --output-suffix before the extension of an output filename,
+        so a filtered run (e.g. held-out items only) never overwrites the
+        full-instrument outputs sitting in the same directory."""
+        p = Path(name)
+        return output_dir / f"{p.stem}{args.output_suffix}{p.suffix}"
 
     if not judgments_dir.exists():
         sys.exit(f"Judgments directory not found: {judgments_dir}")
@@ -534,6 +573,26 @@ def main() -> None:
 
     print(f"Loading {aggregated_path.name}")
     aggregated_df = pd.read_csv(aggregated_path)
+
+    item_id_filter: set[str] | None = None
+    if args.item_range is not None:
+        start, end = args.item_range
+        # Extract the trailing digits of each item_id (e.g. "vcl_037" -> 37).
+        # Applied uniformly across category prefixes: since the two sanity
+        # categories (sty_, rh_) only contain items 1-20, any range starting
+        # above 20 excludes them automatically without naming categories.
+        suffix_num = aggregated_df["item_id"].str.extract(r"(\d+)$")[0].astype(int)
+        in_range = suffix_num.between(start, end)
+        item_id_filter = set(aggregated_df.loc[in_range, "item_id"])
+        n_before, n_before_ids = len(aggregated_df), aggregated_df["item_id"].nunique()
+        aggregated_df = aggregated_df[in_range]
+        print(
+            f"Filtered to item range [{start}, {end}]: "
+            f"{aggregated_df['item_id'].nunique()} of {n_before_ids} unique items "
+            f"({len(aggregated_df)} of {n_before} judgment rows)"
+        )
+        if aggregated_df.empty:
+            sys.exit(f"No items remain after filtering to range [{start}, {end}].")
 
     # Optional inputs
     pairwise_agreement_path = judgments_dir / "pairwise_agreement.csv"
@@ -552,7 +611,7 @@ def main() -> None:
     # Rate table
     print("Building classification rate table")
     rate_table = build_classification_rate_table(aggregated_df)
-    rate_table.to_csv(output_dir / "cross_lab_tables.csv", index=False)
+    rate_table.to_csv(_out("cross_lab_tables.csv"), index=False)
     print(f"  Wrote {len(rate_table)} rows to cross_lab_tables.csv")
 
     # Pairwise tests. Focus on paper-relevant labels to reduce
@@ -588,19 +647,21 @@ def main() -> None:
     tests_df = pairwise_classification_tests(
         rate_table, focus_classifications=focus_classifications
     )
-    tests_df.to_csv(output_dir / "statistical_tests.csv", index=False)
+    tests_df.to_csv(_out("statistical_tests.csv"), index=False)
     print(f"  Wrote {len(tests_df)} tests to statistical_tests.csv")
 
     # Fleiss' kappa per category
     print("Computing Fleiss' kappa per category")
     try:
-        kappa_by_category = compute_fleiss_kappa_per_category(judgments_dir)
+        kappa_by_category = compute_fleiss_kappa_per_category(
+            judgments_dir, item_id_filter=item_id_filter
+        )
     except Exception as e:
         print(f"  Kappa computation failed: {e}")
         kappa_by_category = {}
 
     # Agreement summary text file
-    with (output_dir / "agreement_summary.txt").open("w", encoding="utf-8") as f:
+    with _out("agreement_summary.txt").open("w", encoding="utf-8") as f:
         f.write("Fleiss' kappa per category (inter-judge agreement)\n")
         f.write("=" * 60 + "\n\n")
         for cat, kappa in sorted(kappa_by_category.items()):
@@ -617,7 +678,7 @@ def main() -> None:
         divergence_summary_df=divergence_summary_df,
         divergence_direction_df=divergence_direction_df,
     )
-    (output_dir / "analysis_report.md").write_text(report, encoding="utf-8")
+    (_out("analysis_report.md")).write_text(report, encoding="utf-8")
     print("  Wrote analysis_report.md")
 
     print()

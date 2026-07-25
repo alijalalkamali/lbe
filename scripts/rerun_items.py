@@ -7,7 +7,28 @@ runs, and writes the merged file back. Original results are backed up with a
 Items can be selected by explicit ID or by category. Category selection
 exists because the common case — "regenerate every core-category item for
 this model with a larger budget, because its responses were truncated" —
-otherwise means pasting 60 IDs onto the command line.
+otherwise means pasting many IDs onto the command line.
+
+Fail-fast behavior:
+    This script generates for ONE model across potentially many items, so
+    unlike the judge pipeline there's no "next combination" to move to --
+    a fatal, section-wide error (quota exhaustion, billing failure, invalid
+    credentials, model access restriction) means every remaining item for
+    THIS model will fail identically. Rather than crash uninformatively or
+    grind through each remaining item hitting the same wall, this script:
+      1. Prints one clean, classified error report (category, plain-language
+         summary, current time, and the provider's estimated retry-after
+         time if one was supplied) instead of a raw exception dump.
+      2. Stops generating further items immediately.
+      3. Writes a merged results file containing whatever succeeded before
+         the abort, so no completed work is lost.
+      4. Reports exactly which items still need to be run, so you can
+         re-invoke this script for just those once the underlying issue
+         (quota reset, billing top-up, wrong project) is resolved.
+
+    A non-fatal, per-item error (a single transient timeout, a one-off
+    content-filter block) is recorded and the run continues to the next
+    item -- only a fatal, section-wide condition stops the run early.
 
 IMPORTANT — regenerating a response invalidates its judgments:
     run_judge_pipeline.py is resumable and will NOT re-judge an item it has
@@ -30,7 +51,7 @@ Usage:
         --max-tokens 1500
 
 Reads:
-    data/steerability_items_v2.jsonl
+    data/<items-file> (default: steerability_items_v2.jsonl)
     results/steerability_v2_<sanitized_model>.jsonl
 
 Writes:
@@ -49,6 +70,7 @@ from lbe.evals.steerability_v2 import run_v2_item
 from lbe.io.dataset import EvalResult, SteerabilityItem
 from lbe.io.jsonl import read_jsonl, write_jsonl
 from lbe.models.base import TRUNCATION_FINISH_REASONS
+from lbe.models.error_utils import classify_error, format_error_report
 from lbe.models.loader import load_model
 
 
@@ -76,7 +98,7 @@ def main() -> None:
         "--categories",
         nargs="*",
         default=None,
-        help="Re-run every item in these categories. Mutually exclusive with " "--item-ids.",
+        help="Re-run every item in these categories. Mutually exclusive with --item-ids.",
     )
     parser.add_argument(
         "--max-tokens",
@@ -85,13 +107,19 @@ def main() -> None:
         help="Max visible tokens per response. Default 500. Raise this when "
         "repairing truncated responses.",
     )
+    parser.add_argument(
+        "--items-file",
+        default="steerability_items_v2.jsonl",
+        help="Items file under data/ to read from. Default: steerability_items_v2.jsonl. "
+        "Use steerability_items_v3.jsonl when working with the expanded item set.",
+    )
     args = parser.parse_args()
 
     if bool(args.item_ids) == bool(args.categories):
         sys.exit("Provide exactly one of --item-ids or --categories.")
 
     repo_root = Path(__file__).resolve().parent.parent
-    items_path = repo_root / "data" / "steerability_items_v2.jsonl"
+    items_path = repo_root / "data" / args.items_file
     results_dir = repo_root / "results"
 
     safe_name = sanitize_filename(args.model)
@@ -116,9 +144,7 @@ def main() -> None:
         known_categories = {i.category for i in all_items.values()}
         unknown = set(args.categories) - known_categories
         if unknown:
-            sys.exit(
-                f"Unknown categories: {sorted(unknown)}. " f"Known: {sorted(known_categories)}"
-            )
+            sys.exit(f"Unknown categories: {sorted(unknown)}. Known: {sorted(known_categories)}")
         item_ids = sorted(i.id for i in all_items.values() if i.category in args.categories)
         print(f"Selected {len(item_ids)} item(s) from categories {args.categories}")
     else:
@@ -148,16 +174,43 @@ def main() -> None:
     # Load model and re-run the selected items.
     model = load_model(args.model)
     still_truncated: list[tuple[str, str]] = []
+    succeeded_ids: list[str] = []
+    not_attempted_ids: list[str] = []
+    aborted_early = False
+
     for i, item_id in enumerate(item_ids, 1):
         item = all_items[item_id]
         print(f"  [{i}/{len(item_ids)}] {item_id}")
-        new_result = run_v2_item(
-            item=item,
-            model=model,
-            model_name=args.model,
-            max_new_tokens=args.max_tokens,
-        )
+
+        try:
+            new_result = run_v2_item(
+                item=item,
+                model=model,
+                model_name=args.model,
+                max_new_tokens=args.max_tokens,
+            )
+        except Exception as e:
+            classified = classify_error(e)
+            if classified.is_fatal:
+                # Every remaining item will fail identically -- stop here,
+                # save whatever succeeded, and report what's left rather
+                # than grinding through the rest of item_ids.
+                print()
+                print(format_error_report(e, context=f"model={args.model} item={item_id}"))
+                print(
+                    f"  Fatal condition -- stopping. {len(succeeded_ids)}/{len(item_ids)} "
+                    f"item(s) succeeded before this point."
+                )
+                not_attempted_ids = item_ids[i - 1 :]  # this one + everything after
+                aborted_early = True
+                break
+            else:
+                # Non-fatal, per-item failure: record and continue.
+                print(f"    Non-fatal error, skipping this item: {classify_error(e).summary}")
+                continue
+
         results_by_id[item_id] = new_result
+        succeeded_ids.append(item_id)
         for cond, reason in zip(("base", "steered"), new_result.finish_reasons or [], strict=False):
             if reason in TRUNCATION_FINISH_REASONS:
                 still_truncated.append((item_id, cond))
@@ -165,13 +218,28 @@ def main() -> None:
     # Reassemble preserving original ordering where possible.
     # For any new IDs not in the original file, append at the end.
     original_order = [r.item_id for r in existing_results]
-    added_ids = [i for i in item_ids if i not in original_order]
-    final_order = original_order + added_ids
+    added_ids = [i for i in item_ids if i not in original_order and i in results_by_id]
+    final_order = [i for i in original_order if i in results_by_id] + added_ids
 
     merged = [results_by_id[iid] for iid in final_order]
 
     write_jsonl(results_path, merged)
-    print(f"Wrote merged results ({len(merged)} items) to {results_path.name}")
+    print(f"\nWrote merged results ({len(merged)} items) to {results_path.name}")
+
+    if aborted_early:
+        print(
+            f"\nRun stopped early due to a fatal error. "
+            f"{len(succeeded_ids)}/{len(item_ids)} item(s) completed this run."
+        )
+        print("Still need to be run once the issue above is resolved:")
+        print(f"  {not_attempted_ids}")
+        if args.categories:
+            print(
+                f"\nRe-invoke with just the remaining items, e.g.:\n"
+                f"  python scripts/rerun_items.py {args.model} "
+                f"--item-ids {' '.join(not_attempted_ids)} --max-tokens {args.max_tokens} "
+                f"--items-file {args.items_file}"
+            )
 
     if still_truncated:
         print(
@@ -181,21 +249,22 @@ def main() -> None:
         for item_id, cond in still_truncated:
             print(f"  {item_id} [{cond}]")
         print("Raise --max-tokens and re-run these before judging.")
-    else:
-        print("\nAll regenerated responses ended naturally (no truncation).")
+    elif succeeded_ids:
+        print("\nAll regenerated responses this run ended naturally (no truncation).")
 
-    if args.categories:
-        scope_flag = "--categories " + " ".join(args.categories)
-    else:
-        scope_flag = "--item-ids " + " ".join(item_ids)
+    if succeeded_ids:
+        if args.categories:
+            scope_flag = "--categories " + " ".join(args.categories)
+        else:
+            scope_flag = "--item-ids " + " ".join(succeeded_ids)
 
-    print(
-        f"\nIMPORTANT: judgments for these items are now stale. Clear and "
-        f"refill them:\n"
-        f"  python scripts/invalidate_judgments.py --responder {args.model} "
-        f"{scope_flag} --yes\n"
-        f"  python scripts/run_judge_pipeline.py --responders {args.model}"
-    )
+        print(
+            f"\nIMPORTANT: judgments for these items are now stale. Clear and "
+            f"refill them:\n"
+            f"  python scripts/invalidate_judgments.py --responder {args.model} "
+            f"{scope_flag} --yes\n"
+            f"  python scripts/run_judge_pipeline.py --responders {args.model}"
+        )
 
 
 if __name__ == "__main__":

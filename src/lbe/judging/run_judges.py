@@ -4,13 +4,20 @@ collects classifications.
 Design goals:
     - Resumable: skips (item, condition, judge) combinations already judged
       in the output file. If the run crashes or is killed, restart picks up
-      where it left off.
+      where it left off. Only SUCCESSFUL judgments count as "already judged"
+      — rows left behind by a failed call (empty classification) are treated
+      as not-yet-judged so a re-run naturally re-attempts them.
     - Per-judge output files: each judge's classifications go in their own
       JSONL file, keyed by responder model + condition + item id. This
       isolates per-judge failures and lets you rerun a single judge without
       touching others.
     - Failure recording: judge output errors are recorded to a separate
       errors file with the raw text preserved for post-hoc analysis.
+    - Fail-fast on fatal conditions: quota exhaustion, billing failure, or an
+      inaccessible model fails every remaining call in a section identically.
+      Rather than grind through hundreds of guaranteed failures, the section
+      aborts immediately (progress saved) and the caller moves on to the next
+      judge×responder combination.
     - Cost tracking: logs approximate token usage per judgment (from the
       judge model's response metadata where available).
 """
@@ -29,6 +36,41 @@ from lbe.judging.judge_output import JudgeOutputError, parse_judge_output
 from lbe.judging.judge_prompt import build_judge_prompt
 from lbe.judging.rubrics import Rubric, get_rubric
 from lbe.models.loader import load_model
+
+
+class FatalJudgeError(Exception):
+    """A judge-level error that makes continuing this judge×responder section
+    pointless — quota exhaustion, billing failure, invalid/expired key, or a
+    model that's inaccessible to this project. Unlike a per-item parse or
+    transient API error (which we record and move past), these fail every
+    remaining call identically, so we abort the whole section immediately and
+    let the caller move on to the next judge×responder combination rather than
+    grinding through hundreds of guaranteed failures.
+    """
+
+
+# Substrings that identify a fatal, section-wide condition. Matched against
+# the string form of the raised exception. Deliberately conservative: only
+# quota/billing/auth/access conditions, not transient timeouts or rate spikes
+# that a later item might survive.
+_FATAL_ERROR_MARKERS = (
+    "insufficient_quota",
+    "exceeded your current quota",
+    "resource_exhausted",
+    "no longer available to new users",
+    "invalid_api_key",
+    "invalid x-api-key",
+    "authentication",
+    "permission_denied",
+    "billing",
+)
+
+
+def _is_fatal_error(exc: Exception) -> bool:
+    """True if this exception indicates a section-wide fatal condition
+    (quota/billing/auth/access) rather than a per-item transient failure."""
+    text = repr(exc).lower()
+    return any(marker in text for marker in _FATAL_ERROR_MARKERS)
 
 
 class JudgmentRecord(BaseModel):
@@ -70,13 +112,20 @@ def _make_key(item_id: str, condition: str) -> str:
 
 def _load_already_judged(judge_output_path: Path) -> set[str]:
     """Read an existing judge output file and return the set of keys
-    already judged. Used for resumability.
+    SUCCESSFULLY judged. Used for resumability.
+
+    Only records with a non-empty classification and no error count as
+    "already judged". Rows left behind by a failed call (empty classification,
+    or a populated `error`) are deliberately NOT counted, so a re-run
+    re-attempts exactly those items rather than treating a prior failure as
+    done. This is what makes a plain pipeline re-run fill real gaps without a
+    separate purge step.
 
     Args:
         judge_output_path: Path to the judge's JSONL file.
 
     Returns:
-        Set of keys (formatted "<item_id>::<condition>") already present.
+        Set of keys (formatted "<item_id>::<condition>") successfully judged.
         Empty set if the file doesn't exist.
     """
     if not judge_output_path.exists():
@@ -84,7 +133,8 @@ def _load_already_judged(judge_output_path: Path) -> set[str]:
 
     already: set[str] = set()
     for record in read_jsonl(judge_output_path, JudgmentRecord):
-        already.add(_make_key(record.item_id, record.condition))
+        if record.classification.strip() and not record.error:
+            already.add(_make_key(record.item_id, record.condition))
     return already
 
 
@@ -136,6 +186,9 @@ def _call_judge_with_retry(
     times with a stronger instruction. If all attempts fail, returns the
     last raw output with parsed=None.
 
+    A fatal condition (quota/billing/auth/access) is NOT retried — it is
+    raised as FatalJudgeError so the caller can abort the whole section.
+
     Args:
         judge: Judge model backend (has .generate method).
         prompt: The judge prompt.
@@ -144,6 +197,10 @@ def _call_judge_with_retry(
 
     Returns:
         Tuple of (raw_output_text, parsed_result_dict or None).
+
+    Raises:
+        FatalJudgeError: If the generation call fails with a section-wide
+            fatal condition.
     """
     reparse_prompt_suffix = (
         "\n\nIMPORTANT: Your previous response was not valid JSON. "
@@ -155,7 +212,14 @@ def _call_judge_with_retry(
     last_raw: str = ""
 
     for attempt in range(max_reparse_retries + 1):
-        raw = judge.generate(current_prompt, max_new_tokens=800).text
+        try:
+            raw = judge.generate(current_prompt, max_new_tokens=800).text
+        except Exception as e:
+            if _is_fatal_error(e):
+                # Don't waste the reparse retry on a quota/auth failure —
+                # it will fail identically. Propagate to abort the section.
+                raise FatalJudgeError(repr(e)) from e
+            raise  # transient/other error: let caller's handling deal with it
         last_raw = raw
 
         try:
@@ -182,9 +246,9 @@ def run_judge_on_responder(
     """Run one judge model across all (item, condition) pairs for one
     responder model, writing classifications to output_path.
 
-    Resumable: if output_path already contains judgments for some
-    (item_id, condition) keys, those are skipped and only missing
-    combinations are judged.
+    Resumable: if output_path already contains SUCCESSFUL judgments for some
+    (item_id, condition) keys, those are skipped and only missing or
+    previously-failed combinations are judged.
 
     Args:
         judge_model_name: Model identifier for the judge (loader.py format,
@@ -198,6 +262,12 @@ def run_judge_on_responder(
             appended.
         conditions: Which conditions to judge; default ('base', 'steered').
         error_log_path: Optional path to log parse errors with raw output.
+
+    Raises:
+        FatalJudgeError: If a section-wide fatal condition (quota/billing/
+            auth/access) is hit. Progress judged before the abort is saved
+            first. Callers that run many sections should catch this and
+            continue to the next combination.
     """
     print(f"Judge: {judge_model_name}")
     print(f"Responder: {responder_model_name}")
@@ -207,7 +277,8 @@ def run_judge_on_responder(
     items = {i.id: i for i in read_jsonl(items_path, SteerabilityItem)}
     responder_results = _load_responder_results(responder_results_path)
 
-    # Determine which combinations still need judging
+    # Determine which combinations still need judging. Only successful
+    # judgments count as done, so previously-failed rows are re-attempted.
     already_judged = _load_already_judged(output_path)
     total_planned = len(responder_results) * len(conditions)
     to_judge = [
@@ -229,11 +300,25 @@ def run_judge_on_responder(
     judge = load_model(judge_model_name)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Append to output file as we go, so partial progress is preserved
-    # on crash. Read existing records first so we can rewrite the file
-    # atomically at the end.
-    existing_records = list(read_jsonl(output_path, JudgmentRecord)) if output_path.exists() else []
+    # Read existing records first so we can rewrite the file atomically.
+    # Keep only SUCCESSFUL prior records — drop any empty/errored rows so a
+    # resumed run doesn't re-accumulate the failed rows it's re-attempting.
+    existing_records = [
+        r
+        for r in (read_jsonl(output_path, JudgmentRecord) if output_path.exists() else [])
+        if r.classification.strip() and not r.error
+    ]
     new_records: list[JudgmentRecord] = []
+
+    def _persist() -> None:
+        """Write successful existing + all new records, and (if configured)
+        the errors file. Called on progress checkpoints and on abort."""
+        write_jsonl(output_path, existing_records + new_records)
+        if error_log_path is not None:
+            errors = [r for r in new_records if r.error]
+            if errors:
+                error_log_path.parent.mkdir(parents=True, exist_ok=True)
+                write_jsonl(error_log_path, errors)
 
     start_time = time.time()
     for idx, (result, condition) in enumerate(to_judge, 1):
@@ -272,8 +357,21 @@ def run_judge_on_responder(
                 record.confidence = parsed["confidence"]
             else:
                 record.error = "parse_failed_after_retries"
+        except FatalJudgeError as e:
+            # Section-wide fatal condition (quota/billing/auth/access).
+            # Persist everything judged so far this run, then abort the
+            # section so the caller moves on to the next combination.
+            print(
+                f"\n  FATAL for judge={judge_model_name} "
+                f"responder={responder_model_name}: {e}\n"
+                f"  Skipping the rest of this combination. "
+                f"{len(new_records)} judged this run before abort; progress saved."
+            )
+            _persist()
+            raise
         except Exception as e:
-            # Non-parse errors (API failures, timeouts): record and continue
+            # Non-parse errors (transient API failures, timeouts): record and
+            # continue to the next item.
             record.error = f"call_failed: {e!r}"
 
         new_records.append(record)
@@ -287,18 +385,14 @@ def run_judge_on_responder(
                 f"  [{idx}/{len(to_judge)}] "
                 f"elapsed={elapsed:.0f}s rate={rate:.2f}/s eta={eta:.0f}s"
             )
-            # Persist progress by rewriting file with existing + new records
-            write_jsonl(output_path, existing_records + new_records)
+            _persist()
 
     # Final write (in case last progress-save didn't fire on exact boundary)
-    write_jsonl(output_path, existing_records + new_records)
+    _persist()
 
-    # Optionally log errors to a separate file for post-hoc analysis
     if error_log_path is not None:
         errors = [r for r in new_records if r.error]
         if errors:
-            error_log_path.parent.mkdir(parents=True, exist_ok=True)
-            write_jsonl(error_log_path, errors)
             print(f"Wrote {len(errors)} error records to {error_log_path.name}")
 
     num_success = sum(1 for r in new_records if not r.error)

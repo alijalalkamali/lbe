@@ -42,7 +42,7 @@ def main() -> None:
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent.parent
-    items_path = repo_root / "data" / "steerability_items_v2.jsonl"
+    items_path = repo_root / "data" / args.items_file
     output_dir = repo_root / "results"
     output_dir.mkdir(parents=True, exist_ok=True)
 

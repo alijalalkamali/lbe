@@ -97,10 +97,15 @@ def main() -> None:
         action="store_true",
         help="Run judging but skip the aggregation step.",
     )
+    parser.add_argument(
+        "--items-file",
+        default="steerability_items_v2.jsonl",
+        help="Items file under data/. Use steerability_items_v3.jsonl for the expanded set.",
+    )
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent.parent
-    items_path = repo_root / "data" / "steerability_items_v2.jsonl"
+    items_path = repo_root / "data" / args.items_file
     results_dir = repo_root / "results"
     judgments_dir = results_dir / "judgments"
 

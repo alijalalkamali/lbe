@@ -7,9 +7,10 @@ without re-running the eval.
 
 Usage:
     python scripts/dump_readable_v2.py
+    python scripts/dump_readable_v2.py --items-file steerability_items_v3.jsonl
 
 Reads:
-    data/steerability_items_v2.jsonl
+    data/<items-file> (default: steerability_items_v2.jsonl)
     results/steerability_v2_*.jsonl
 
 Writes:
@@ -18,6 +19,7 @@ Writes:
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 from lbe.io.dataset import EvalResult, SteerabilityItem
@@ -49,7 +51,7 @@ def dump_one(results_path: Path, items: dict[str, SteerabilityItem]) -> Path:
             f.write(f"{r.item_id}  category={category}  model={r.model_name}\n\n")
 
             if item is None:
-                f.write(f"[Item {r.item_id!r} not found in v2 items file]\n\n")
+                f.write(f"[Item {r.item_id!r} not found in items file]\n\n")
                 f.write(f"BASE RESPONSE:\n{r.raw_completions[0]}\n\n")
                 f.write(f"STEERED RESPONSE:\n{r.raw_completions[1]}\n\n")
                 continue
@@ -64,17 +66,25 @@ def dump_one(results_path: Path, items: dict[str, SteerabilityItem]) -> Path:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Dump v2 eval results to readable text.")
+    parser.add_argument(
+        "--items-file",
+        default="steerability_items_v2.jsonl",
+        help="Items file under data/. Use steerability_items_v3.jsonl for the expanded set.",
+    )
+    args = parser.parse_args()
+
     repo_root = Path(__file__).resolve().parent.parent
-    items_path = repo_root / "data" / "steerability_items_v2.jsonl"
+    items_path = repo_root / "data" / args.items_file
     results_dir = repo_root / "results"
 
     if not items_path.exists():
-        raise FileNotFoundError(f"v2 items file not found: {items_path}")
+        raise FileNotFoundError(f"Items file not found: {items_path}")
     if not results_dir.exists():
         raise FileNotFoundError(f"Results directory not found: {results_dir}")
 
     items = {i.id: i for i in read_jsonl(items_path, SteerabilityItem)}
-    print(f"Loaded {len(items)} v2 items from {items_path}")
+    print(f"Loaded {len(items)} items from {items_path}")
 
     results_files = sorted(results_dir.glob("steerability_v2_*.jsonl"))
     if not results_files:

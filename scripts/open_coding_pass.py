@@ -529,10 +529,15 @@ def main() -> None:
         help="Optional: run only one analyst by identifier. Default: run all "
         "four analysts sequentially.",
     )
+    parser.add_argument(
+        "--items-file",
+        default="steerability_items_v2.jsonl",
+        help="Items file under data/. Use steerability_items_v3.jsonl for the expanded set.",
+    )
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent.parent
-    items_path = repo_root / "data" / "steerability_items_v2.jsonl"
+    items_path = repo_root / "data" / args.items_file
     results_dir = repo_root / "results"
     output_dir = results_dir / "open_coding"
 
