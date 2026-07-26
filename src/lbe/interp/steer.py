@@ -269,7 +269,11 @@ def run_alpha_sweep(
                     [{"role": "user", "content": ex.prompt_text}],
                     add_generation_prompt=True,
                     return_tensors="pt",
-                ).to(model.device)
+                )
+                # Newer transformers returns a BatchEncoding, not a tensor.
+                if not torch.is_tensor(input_ids):
+                    input_ids = input_ids["input_ids"]
+                input_ids = input_ids.to(model.device)
                 with torch.no_grad():
                     gen = model.generate(
                         input_ids,
