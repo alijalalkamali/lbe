@@ -27,7 +27,7 @@ _PROFILE_SETTINGS: dict[HardwareProfile, dict] = {
     },
     "rental_gpu": {
         "torch_dtype": torch.bfloat16,
-        "attn_implementation": "flash_attention_2",
+        "attn_implementation": "sdpa",
     },
 }
 

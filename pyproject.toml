@@ -8,6 +8,14 @@ version = "0.1.0"
 description = "LLM Behavioral Eval — rigorous behavioral evaluation of small open-weights LLMs"
 readme = "README.md"
 requires-python = ">=3.11"
+dependencies = [
+    "pydantic",
+    "torch",
+    "transformers",
+    "accelerate",
+    "scikit-learn",
+    "numpy",
+]
 authors = [
     {name = "Ali Jalal-Kamali"}
 ]
