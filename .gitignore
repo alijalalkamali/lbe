@@ -68,3 +68,4 @@ results/judgments/*.jsonl
 # Private working notes and draft chapters
 notes/
 judge_validation_observations.md
+workspace/

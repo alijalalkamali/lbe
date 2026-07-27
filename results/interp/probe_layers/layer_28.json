@@ -1,0 +1,12 @@
+{
+  "layer_index": 28,
+  "real_balanced_accuracy": 0.7787356321839081,
+  "permutation_mean": 0.5005665024630541,
+  "permutation_std": 0.06740780243511263,
+  "p_value": 0.004975124378109453,
+  "n_examples": 100,
+  "n_positive": 42,
+  "n_permutations": 200,
+  "outer_folds": 5,
+  "inner_folds": 3
+}

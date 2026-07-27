@@ -8,11 +8,13 @@ developer.
 
 ## What this is
 
-Each of 300 core evaluation items pairs a base prompt with a steered variant of
-the same scenario, so every model serves as its own control. Responses are
-classified against fixed categorical rubrics by all six models acting as blind
-judges, producing a complete judge-by-responder matrix of 24,480 judgments
-scored by leave-one-out consensus.
+Each evaluation item pairs a base prompt with a steered variant of the same
+scenario, so every model serves as its own control. The instrument has 340
+items: 100 in each of three core behavioral categories, plus 20 in each of two
+validation categories. Responses are classified against fixed categorical
+rubrics by all six models acting as blind judges, producing a complete
+judge-by-responder matrix of 24,480 judgments (340 items x 2 conditions x 6
+responders x 6 judges) scored by leave-one-out consensus.
 
 The six evaluated models, one per developer:
 
@@ -62,17 +64,18 @@ The findings survived two forms of scrutiny built into the pipeline:
   contrasts persist when the field is stripped.
 - **Held-out validation.** The rubric was built from the first 20 items per
   category. Re-running the full analysis over the 80 items per category that
-  were never read during rubric construction reproduces every headline finding,
-  with inter-judge agreement rising rather than falling on the unseen items.
+  were never read during rubric construction reproduces every headline finding.
 
 ## Repository layout
 
 ```
 data/                     Evaluation items (steerability_items_v3.jsonl, 300 items)
 src/lbe/                  Package: model backends, judging, aggregation, IO
+src/lbe/interp/           Mechanistic interpretability: harvesting, probing, steering
 scripts/                  Pipeline entry points and diagnostics
 results/analysis/         Aggregate rate tables, statistical tests, agreement
 results/leakage/          Demand-characteristics control outputs
+results/interp/           Probe layer sweep and steering-rate results
 ```
 
 The raw per-judge judgment files (24,480 classifications) are large and are
@@ -96,10 +99,17 @@ python scripts/analyze_judgments.py --item-range 21 100 --output-suffix _heldout
 
 Aggregate results and analysis outputs are in `results/`. The full raw
 judgment matrix is available as a GitHub release asset and archived at
-[Zenodo DOI to be added].
+[doi:10.5281/zenodo.21629846](https://doi.org/10.5281/zenodo.21629846).
 
-## Status
+## Mechanistic interpretability (src/lbe/interp/)
 
-Evaluation phase complete. A mechanistic interpretability phase, probing
-open-weight models for internal correlates of the behavioral categories
-identified here, is in development.
+Extends the behavioral evaluation to mechanism on the open-weight model.
+Pipeline: activation harvesting (forward hooks, last-prompt-token residual
+stream, 20 layers of Llama-3.3-70B) → L2-regularized linear probes with
+nested CV and 200-permutation nulls → difference-of-means activation steering
+with a vector/eval item split. Result: the derail-vs-answer split is decodable
+at 0.87 held-out balanced accuracy (plateau layers 32–76) and causally
+steerable: derail rate moves monotonically 0%→86% across the α sweep (Fisher
+p < 1e-5 vs. control both directions). Entry points:
+`src/lbe/interp/{harvest,probe,steer}.py`, `scripts/judge_steering_sweep.py`,
+`scripts/analyze_steering_sweep.py`; results in `results/interp/steering_rates.csv`.
