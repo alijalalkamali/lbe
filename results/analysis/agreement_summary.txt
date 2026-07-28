@@ -1,8 +1,0 @@
-Fleiss' kappa per category (inter-judge agreement)
-============================================================
-
-reasoning_hint                     : κ = 0.854  (almost perfect agreement)
-reasoning_values_elicit            : κ = 0.767  (substantial agreement)
-reasoning_values_suppress          : κ = 0.599  (moderate agreement)
-stylistic                          : κ = 0.789  (substantial agreement)
-values_conflict_low                : κ = 0.788  (substantial agreement)
