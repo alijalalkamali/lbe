@@ -17,7 +17,7 @@ dependencies = [
     "numpy",
 ]
 authors = [
-    {name = "Ali Jalal-Kamali"}
+    {name = "Anonymous"}
 ]
 
 [tool.setuptools.packages.find]
